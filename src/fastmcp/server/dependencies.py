@@ -1244,6 +1244,7 @@ class TaskContext:
                 max_tokens=max_tokens,
                 system_prompt=system_prompt,
                 temperature=temperature,
+                model_preferences=model_preferences,
             )
         return await self._sample_embedded(
             messages,

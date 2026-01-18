@@ -182,7 +182,10 @@ class ElicitForwarder:
 
         try:
             # Import here to avoid circular imports
-            from mcp.types import ElicitResult
+            import anyio
+            import mcp.shared.exceptions
+            import mcp.shared.message
+            import mcp.types
 
             from fastmcp.server.tasks.subscriptions import (
                 send_input_required_notification,
@@ -198,12 +201,41 @@ class ElicitForwarder:
             )
 
             try:
-                # Call the actual session elicit with related_request_id (MCP SDK parameter name)
-                result: ElicitResult = await self.session.elicit(
+                # Use _build_elicit_form_request to emit related-task metadata
+                # This matches embedded mode behavior in TaskContext._elicit_embedded
+                request = self.session._build_elicit_form_request(  # pyright: ignore[reportPrivateUsage]
                     message=request_data["message"],
                     requestedSchema=request_data.get("schema", {}),
-                    related_request_id=self.task_id,
+                    related_task_id=self.task_id,
                 )
+
+                # Send request and wait for response
+                response_stream, response_stream_reader = (
+                    anyio.create_memory_object_stream[
+                        mcp.types.JSONRPCResponse | mcp.types.JSONRPCError
+                    ](1)
+                )
+                req_id = request.id
+                self.session._response_streams[req_id] = response_stream  # pyright: ignore[reportPrivateUsage]
+
+                try:
+                    await self.session._write_stream.send(  # pyright: ignore[reportPrivateUsage]
+                        mcp.shared.message.SessionMessage(
+                            message=mcp.types.JSONRPCMessage(request)
+                        )
+                    )
+
+                    response_or_error = await response_stream_reader.receive()
+
+                    if isinstance(response_or_error, mcp.types.JSONRPCError):
+                        raise mcp.shared.exceptions.McpError(response_or_error.error)
+                    result = mcp.types.ElicitResult.model_validate(
+                        response_or_error.result
+                    )
+                finally:
+                    self.session._response_streams.pop(req_id, None)  # pyright: ignore[reportPrivateUsage]
+                    await response_stream.aclose()
+                    await response_stream_reader.aclose()
 
                 response_payload = json.dumps(
                     {
@@ -250,45 +282,28 @@ class ElicitForwarder:
 
         try:
             # Import here to avoid circular imports
-
-            from mcp.types import (
-                CreateMessageResult,
-                SamplingMessage,
-                TextContent,
-            )
+            import anyio
+            import mcp.shared.exceptions
+            import mcp.shared.message
+            import mcp.types
+            from pydantic import TypeAdapter
 
             from fastmcp.server.tasks.subscriptions import (
                 send_input_required_notification,
             )
 
-            # Build sampling messages with proper content type handling
-            # Use TypeAdapter to support non-text content (images, audio, etc.)
-            messages = []
+            # Build sampling messages using TypeAdapter for proper content type handling
+            # This supports text, image, audio, and any future content types
+            content_adapter = TypeAdapter(mcp.types.SamplingContent)
+            messages: list[mcp.types.SamplingMessage] = []
             for m in request_data["messages"]:
                 role = m.get("role", "user")
                 raw_content = m.get("content", {})
                 if isinstance(raw_content, str):
-                    content = TextContent(type="text", text=raw_content)
-                elif isinstance(raw_content, dict):
-                    # Validate using the content's type field to handle all content types
-                    content_type = raw_content.get("type", "text")
-                    if content_type == "text":
-                        content = TextContent.model_validate(raw_content)
-                    else:
-                        # For non-text content, use dynamic type detection
-                        # Import the union type for proper validation
-                        from mcp.types import (
-                            ImageContent,
-                        )
-
-                        if content_type == "image":
-                            content = ImageContent.model_validate(raw_content)
-                        else:
-                            # Fallback to TextContent for unknown types
-                            content = TextContent.model_validate(raw_content)
+                    content = mcp.types.TextContent(type="text", text=raw_content)
                 else:
-                    content = raw_content
-                messages.append(SamplingMessage(role=role, content=content))
+                    content = content_adapter.validate_python(raw_content)
+                messages.append(mcp.types.SamplingMessage(role=role, content=content))
 
             # Send input_required status per SEP-1686
             await send_input_required_notification(
@@ -300,15 +315,45 @@ class ElicitForwarder:
             )
 
             try:
-                # Call the actual session create_message with related_request_id (MCP SDK parameter name)
-                result: CreateMessageResult = await self.session.create_message(
+                # Use _build_create_message_request to emit related-task metadata
+                # This matches embedded mode behavior in TaskContext._sample_embedded
+                request = self.session._build_create_message_request(  # pyright: ignore[reportPrivateUsage]
                     messages=messages,
                     max_tokens=request_data.get("max_tokens", 512),
                     system_prompt=request_data.get("system_prompt"),
                     temperature=request_data.get("temperature"),
                     model_preferences=request_data.get("model_preferences"),
-                    related_request_id=self.task_id,
+                    related_task_id=self.task_id,
                 )
+
+                # Send request and wait for response
+                response_stream, response_stream_reader = (
+                    anyio.create_memory_object_stream[
+                        mcp.types.JSONRPCResponse | mcp.types.JSONRPCError
+                    ](1)
+                )
+                req_id = request.id
+                self.session._response_streams[req_id] = response_stream  # pyright: ignore[reportPrivateUsage]
+
+                try:
+                    await self.session._write_stream.send(  # pyright: ignore[reportPrivateUsage]
+                        mcp.shared.message.SessionMessage(
+                            message=mcp.types.JSONRPCMessage(request)
+                        )
+                    )
+
+                    response_or_error = await response_stream_reader.receive()
+
+                    if isinstance(response_or_error, mcp.types.JSONRPCError):
+                        raise mcp.shared.exceptions.McpError(response_or_error.error)
+                    result = mcp.types.CreateMessageResult.model_validate(
+                        response_or_error.result
+                    )
+                finally:
+                    self.session._response_streams.pop(req_id, None)  # pyright: ignore[reportPrivateUsage]
+                    await response_stream.aclose()
+                    await response_stream_reader.aclose()
+
             finally:
                 # Restore status to working per SEP-1686
                 with suppress(Exception):
