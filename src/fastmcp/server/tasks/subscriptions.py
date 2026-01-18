@@ -128,6 +128,16 @@ async def _send_status_notification(
     elif state == ExecutionState.CANCELLED:
         status_message = "Task cancelled"
 
+    # Clean up forwarder on terminal states
+    if state in (
+        ExecutionState.COMPLETED,
+        ExecutionState.FAILED,
+        ExecutionState.CANCELLED,
+    ):
+        from fastmcp.server.tasks.forwarder import stop_forwarder
+
+        await stop_forwarder(session_id, task_id)
+
     params_dict = {
         "taskId": task_id,
         "status": mcp_status,

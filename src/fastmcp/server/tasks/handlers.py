@@ -109,6 +109,17 @@ async def submit_to_docket(
 
         register_task_session(session_id, ctx.session)
 
+        # Start forwarder for distributed workers if enabled (FASTMCP_DISTRIBUTED_WORKERS=1)
+        # The forwarder bridges Redis Pub/Sub to the session for elicit/sample requests
+        from fastmcp.server.tasks.forwarder import start_forwarder
+
+        await start_forwarder(
+            session_id=session_id,
+            task_id=server_task_id,
+            session=ctx.session,
+            docket=docket,
+        )
+
     # Send notifications/tasks/created per SEP-1686 (mandatory)
     # Send BEFORE queuing to avoid race where task completes before notification
     notification = mcp.types.JSONRPCNotification(

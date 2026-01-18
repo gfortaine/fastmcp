@@ -900,10 +900,12 @@ class TaskContext:
 
     This implements SEP-1686 ``input_required`` semantics.
 
-    Note:
-        TaskContext is only available in embedded worker mode (the FastMCP
-        default). Distributed workers running in separate processes cannot
-        access the session and will raise an error.
+    TaskContext supports two modes:
+
+    - **Embedded mode** (default): The worker runs in the same process as the
+      FastMCP server. The session is directly accessible.
+    - **Distributed mode**: The worker runs in a separate process. Requests
+      are forwarded via Redis Pub/Sub. Requires ``FASTMCP_DISTRIBUTED_WORKERS=1``.
 
     Example:
         .. code-block:: python
@@ -924,11 +926,13 @@ class TaskContext:
                 return "No name provided"
     """
 
-    __slots__ = ("_session_id", "_task_id")
+    __slots__ = ("_distributed", "_session_id", "_task_id")
 
     def __init__(self, task_id: str, session_id: str) -> None:
         self._task_id = task_id
         self._session_id = session_id
+        # Detect mode: if session is available, we're embedded; otherwise distributed
+        self._distributed = get_task_session(session_id) is None
 
     @property
     def task_id(self) -> str:
@@ -940,21 +944,32 @@ class TaskContext:
         """The session ID for this task."""
         return self._session_id
 
+    @property
+    def is_distributed(self) -> bool:
+        """Whether this TaskContext is running in distributed mode.
+
+        In distributed mode, elicitation and sampling requests are forwarded
+        via Redis Pub/Sub to the FastMCP server process.
+        """
+        return self._distributed
+
     def _get_session(self) -> ServerSession:
         """Get the associated ServerSession.
 
         Raises:
-            RuntimeError: If session is no longer available
+            RuntimeError: If session is no longer available (embedded mode only)
         """
         session = get_task_session(self._session_id)
         if session is None:
             raise RuntimeError(
                 "Session is no longer available. This can happen if the client "
-                "disconnected or if running in distributed worker mode (which "
-                "doesn't support TaskContext). For distributed workers, consider "
-                "using a message queue pattern."
+                "disconnected. Use is_distributed property to check mode."
             )
         return session
+
+    def _get_session_or_none(self) -> ServerSession | None:
+        """Get the associated ServerSession if available."""
+        return get_task_session(self._session_id)
 
     def _get_docket(self) -> Docket:
         """Get the current Docket instance.
@@ -985,6 +1000,8 @@ class TaskContext:
         4. Updates task status back to ``working``
         5. Returns the parsed result
 
+        In distributed mode, the request is forwarded via Redis Pub/Sub.
+
         Args:
             message: The message to display to the user
             response_type: The expected response type. Can be:
@@ -999,7 +1016,8 @@ class TaskContext:
             - ``CancelledElicitation`` if user cancelled
 
         Raises:
-            RuntimeError: If session is no longer available
+            RuntimeError: If session is no longer available (embedded mode)
+            TimeoutError: If request times out (distributed mode)
             McpError: If client doesn't support elicitation
 
         Example:
@@ -1020,6 +1038,16 @@ class TaskContext:
                         return f"{result.data.name} is {result.data.age} years old"
                     return "No info provided"
         """
+        if self._distributed:
+            return await self._elicit_distributed(message, response_type)
+        return await self._elicit_embedded(message, response_type)
+
+    async def _elicit_embedded(
+        self,
+        message: str,
+        response_type: type | None = None,
+    ) -> Any:
+        """Embedded mode elicitation via direct session access."""
         import anyio
         import mcp.shared.exceptions
         import mcp.shared.message
@@ -1101,6 +1129,42 @@ class TaskContext:
                 status="working",
             )
 
+    async def _elicit_distributed(
+        self,
+        message: str,
+        response_type: type | None = None,
+    ) -> Any:
+        """Distributed mode elicitation via Redis Pub/Sub."""
+        from fastmcp.server.elicitation import (
+            CancelledElicitation,
+            DeclinedElicitation,
+            handle_elicit_accept,
+            parse_elicit_response_type,
+        )
+        from fastmcp.server.tasks.redis_proxy import send_elicit_via_redis
+
+        docket = self._get_docket()
+        config = parse_elicit_response_type(response_type)
+
+        # Send via Redis and wait for response
+        response = await send_elicit_via_redis(
+            docket=docket,
+            session_id=self._session_id,
+            task_id=self._task_id,
+            message=message,
+            schema=config.schema,
+        )
+
+        # Parse and return result
+        if response.action == "accept":
+            return handle_elicit_accept(config, response.content)
+        elif response.action == "decline":
+            return DeclinedElicitation()
+        elif response.action == "cancel":
+            return CancelledElicitation()
+        else:
+            raise ValueError(f"Unexpected elicitation action: {response.action}")
+
     async def sample(
         self,
         messages: list[Any],
@@ -1120,6 +1184,8 @@ class TaskContext:
         4. Updates task status back to ``working``
         5. Returns the result
 
+        In distributed mode, the request is forwarded via Redis Pub/Sub.
+
         Args:
             messages: The conversation messages for sampling
             max_tokens: Maximum tokens in the response (default: 512)
@@ -1131,7 +1197,8 @@ class TaskContext:
             CreateMessageResult from the client
 
         Raises:
-            RuntimeError: If session is no longer available
+            RuntimeError: If session is no longer available (embedded mode)
+            TimeoutError: If request times out (distributed mode)
             McpError: If client doesn't support sampling
 
         Example:
@@ -1148,6 +1215,31 @@ class TaskContext:
                     )
                     return result.content.text
         """
+        if self._distributed:
+            return await self._sample_distributed(
+                messages,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                temperature=temperature,
+            )
+        return await self._sample_embedded(
+            messages,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            model_preferences=model_preferences,
+        )
+
+    async def _sample_embedded(
+        self,
+        messages: list[Any],
+        *,
+        max_tokens: int = 512,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        model_preferences: Any | None = None,
+    ) -> Any:
+        """Embedded mode sampling via direct session access."""
         import anyio
         import mcp.shared.exceptions
         import mcp.shared.message
@@ -1159,18 +1251,7 @@ class TaskContext:
         docket = self._get_docket()
 
         # Convert simple message dicts to SamplingMessage if needed
-        sampling_messages = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                from mcp.types import SamplingMessage, TextContent
-
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    content = TextContent(type="text", text=content)
-                sampling_messages.append(SamplingMessage(role=role, content=content))
-            else:
-                sampling_messages.append(msg)
+        sampling_messages = self._convert_messages(messages)
 
         try:
             # Update status to input_required
@@ -1228,6 +1309,57 @@ class TaskContext:
                 docket=docket,
                 status="working",
             )
+
+    async def _sample_distributed(
+        self,
+        messages: list[Any],
+        *,
+        max_tokens: int = 512,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+    ) -> Any:
+        """Distributed mode sampling via Redis Pub/Sub."""
+        import mcp.types
+
+        from fastmcp.server.tasks.redis_proxy import send_sample_via_redis
+
+        docket = self._get_docket()
+
+        # Convert messages to serializable format
+        sampling_messages = self._convert_messages(messages)
+        messages_data = [
+            {"role": m.role, "content": m.content.model_dump(mode="json")}
+            for m in sampling_messages
+        ]
+
+        # Send via Redis and wait for response
+        result_data = await send_sample_via_redis(
+            docket=docket,
+            session_id=self._session_id,
+            task_id=self._task_id,
+            messages=messages_data,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+            temperature=temperature,
+        )
+
+        return mcp.types.CreateMessageResult.model_validate(result_data)
+
+    def _convert_messages(self, messages: list[Any]) -> list[Any]:
+        """Convert simple message dicts to SamplingMessage objects."""
+        from mcp.types import SamplingMessage, TextContent
+
+        sampling_messages = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    content = TextContent(type="text", text=content)
+                sampling_messages.append(SamplingMessage(role=role, content=content))
+            else:
+                sampling_messages.append(msg)
+        return sampling_messages
 
 
 class _CurrentTaskContext(Dependency):  # type: ignore[misc]
