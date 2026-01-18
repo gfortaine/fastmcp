@@ -963,13 +963,13 @@ class TaskContext:
 
     @property
     def session_available(self) -> bool:
-        """Whether an embedded session is available.
+        """Whether an embedded session is currently available.
 
-        This is the inverse of being in a distributed worker. Use this to
-        check if direct session access is possible, regardless of whether
-        distributed mode is enabled.
+        This checks live session state, not a cached value. Use this to
+        determine if direct session access is possible. Returns False if
+        the client has disconnected since TaskContext was created.
         """
-        return not self._distributed
+        return get_task_session(self._session_id) is not None
 
     def _ensure_distributed_enabled(self) -> None:
         """Validate that distributed mode is properly configured.
@@ -1073,7 +1073,7 @@ class TaskContext:
                         return f"{result.data.name} is {result.data.age} years old"
                     return "No info provided"
         """
-        if self._distributed:
+        if self.is_distributed:
             return await self._elicit_distributed(message, response_type)
         return await self._elicit_embedded(message, response_type)
 
@@ -1252,7 +1252,7 @@ class TaskContext:
                     )
                     return result.content.text
         """
-        if self._distributed:
+        if self.is_distributed:
             return await self._sample_distributed(
                 messages,
                 max_tokens=max_tokens,

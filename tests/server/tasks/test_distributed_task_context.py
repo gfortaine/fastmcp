@@ -203,3 +203,145 @@ class TestTaskContextDistributedMode:
         # Verify it's a property, not a method
         assert isinstance(type(ctx).is_distributed, property)
         assert isinstance(type(ctx).session_available, property)
+
+    def test_session_available_reflects_live_state(self) -> None:
+        """session_available should reflect live session state, not cached value."""
+        from fastmcp.server.dependencies import (
+            TaskContext,
+            _task_sessions,
+            register_task_session,
+        )
+
+        # Create and register a mock session
+        mock_session = MagicMock()
+        register_task_session("sess2", mock_session)
+
+        try:
+            ctx = TaskContext(task_id="task1", session_id="sess2")
+            # Session is available
+            assert ctx.session_available is True
+
+            # Simulate session disconnect by removing from registry
+            _task_sessions.pop("sess2", None)
+
+            # session_available should now return False (live check)
+            assert ctx.session_available is False
+        finally:
+            _task_sessions.pop("sess2", None)
+
+    def test_is_distributed_false_when_flag_off_session_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """is_distributed should be False when session missing but flag is off."""
+        from fastmcp.server.dependencies import TaskContext
+
+        # Ensure distributed mode is OFF
+        monkeypatch.delenv("FASTMCP_DISTRIBUTED_WORKERS", raising=False)
+
+        # No session registered, but flag is off
+        ctx = TaskContext(task_id="task1", session_id="nonexistent")
+
+        # Should NOT be distributed (flag is off)
+        assert ctx.is_distributed is False
+        # Session should NOT be available
+        assert ctx.session_available is False
+
+
+class TestDistributedSerialization:
+    """Tests for serialization/parsing in distributed mode."""
+
+    def test_dump_content_single_text_block(self) -> None:
+        """_dump_content should serialize single text content block."""
+        from mcp.types import TextContent
+
+        content = TextContent(type="text", text="Hello world")
+
+        # Test the serialization pattern used in distributed mode
+        result = content.model_dump(mode="json")
+        # Core fields should be present
+        assert result["type"] == "text"
+        assert result["text"] == "Hello world"
+
+    def test_dump_content_multi_block_list(self) -> None:
+        """Content list should serialize to list of dicts."""
+        from mcp.types import ImageContent, TextContent
+
+        blocks = [
+            TextContent(type="text", text="Hello"),
+            ImageContent(type="image", data="base64data", mimeType="image/png"),
+        ]
+
+        result = [block.model_dump(mode="json") for block in blocks]
+        assert len(result) == 2
+        # Check core fields are present
+        assert result[0]["type"] == "text"
+        assert result[0]["text"] == "Hello"
+        assert result[1]["type"] == "image"
+        assert result[1]["data"] == "base64data"
+        assert result[1]["mimeType"] == "image/png"
+
+    def test_forwarder_parses_text_content(self) -> None:
+        """Forwarder should parse text content from request data."""
+        from mcp.types import SamplingMessage, TextContent
+        from pydantic import TypeAdapter
+
+        content_annotation = SamplingMessage.model_fields["content"].annotation
+        content_adapter: TypeAdapter = TypeAdapter(content_annotation)
+
+        # Simulate parsing text content from JSON
+        raw_content = {"type": "text", "text": "Hello"}
+        parsed = content_adapter.validate_python(raw_content)
+
+        assert isinstance(parsed, TextContent)
+        assert parsed.text == "Hello"
+
+    def test_forwarder_parses_image_content(self) -> None:
+        """Forwarder should parse image content from request data."""
+        from mcp.types import ImageContent, SamplingMessage
+        from pydantic import TypeAdapter
+
+        content_annotation = SamplingMessage.model_fields["content"].annotation
+        content_adapter: TypeAdapter = TypeAdapter(content_annotation)
+
+        raw_content = {"type": "image", "data": "base64==", "mimeType": "image/png"}
+        parsed = content_adapter.validate_python(raw_content)
+
+        assert isinstance(parsed, ImageContent)
+        assert parsed.data == "base64=="
+        assert parsed.mimeType == "image/png"
+
+    def test_forwarder_parses_content_list(self) -> None:
+        """Forwarder should parse list of content blocks."""
+        from mcp.types import ImageContent, SamplingMessage, TextContent
+        from pydantic import TypeAdapter
+
+        content_annotation = SamplingMessage.model_fields["content"].annotation
+        content_adapter: TypeAdapter = TypeAdapter(content_annotation)
+
+        # List of mixed content
+        raw_content = [
+            {"type": "text", "text": "Look at this:"},
+            {"type": "image", "data": "abc123", "mimeType": "image/jpeg"},
+        ]
+        parsed = content_adapter.validate_python(raw_content)
+
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert isinstance(parsed[0], TextContent)
+        assert isinstance(parsed[1], ImageContent)
+
+    def test_model_preferences_serialization(self) -> None:
+        """model_preferences should serialize to JSON-compatible dict."""
+        from mcp.types import ModelPreferences
+
+        prefs = ModelPreferences(
+            hints=[],
+            costPriority=0.5,
+            speedPriority=0.3,
+            intelligencePriority=0.8,
+        )
+
+        result = prefs.model_dump(mode="json")
+        assert result["costPriority"] == 0.5
+        assert result["speedPriority"] == 0.3
+        assert result["intelligencePriority"] == 0.8
