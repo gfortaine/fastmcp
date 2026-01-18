@@ -166,6 +166,7 @@ async def send_sample_via_redis(
     max_tokens: int = 512,
     system_prompt: str | None = None,
     temperature: float | None = None,
+    model_preferences: dict[str, Any] | None = None,
     timeout: float = SAMPLE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Send sampling request via Redis and wait for response.
@@ -178,6 +179,7 @@ async def send_sample_via_redis(
         max_tokens: Maximum tokens in response
         system_prompt: Optional system prompt
         temperature: Sampling temperature
+        model_preferences: Optional model selection hints (priorities, cost, speed, etc.)
         timeout: Timeout in seconds
 
     Returns:
@@ -198,6 +200,7 @@ async def send_sample_via_redis(
             "max_tokens": max_tokens,
             "system_prompt": system_prompt,
             "temperature": temperature,
+            "model_preferences": model_preferences,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )

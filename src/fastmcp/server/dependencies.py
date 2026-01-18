@@ -926,11 +926,15 @@ class TaskContext:
                 return "No name provided"
     """
 
-    __slots__ = ("_distributed", "_session_id", "_task_id")
+    __slots__ = ("_distributed", "_distributed_enabled", "_session_id", "_task_id")
 
     def __init__(self, task_id: str, session_id: str) -> None:
+        from fastmcp.server.tasks.forwarder import is_distributed_mode_enabled
+
         self._task_id = task_id
         self._session_id = session_id
+        # Cache the feature flag state
+        self._distributed_enabled = is_distributed_mode_enabled()
         # Detect mode: if session is available, we're embedded; otherwise distributed
         self._distributed = get_task_session(session_id) is None
 
@@ -952,6 +956,23 @@ class TaskContext:
         via Redis Pub/Sub to the FastMCP server process.
         """
         return self._distributed
+
+    def _ensure_distributed_enabled(self) -> None:
+        """Validate that distributed mode is properly configured.
+
+        Raises:
+            RuntimeError: If distributed mode is not enabled or session is internal
+        """
+        if not self._distributed_enabled:
+            raise RuntimeError(
+                "Distributed TaskContext is disabled. "
+                "Set FASTMCP_DISTRIBUTED_WORKERS=1 to enable distributed workers."
+            )
+        if self._session_id == "internal":
+            raise RuntimeError(
+                "TaskContext.elicit/sample requires an MCP session; "
+                "internal sessions do not support distributed mode."
+            )
 
     def _get_session(self) -> ServerSession:
         """Get the associated ServerSession.
@@ -1135,6 +1156,8 @@ class TaskContext:
         response_type: type | None = None,
     ) -> Any:
         """Distributed mode elicitation via Redis Pub/Sub."""
+        self._ensure_distributed_enabled()
+
         from fastmcp.server.elicitation import (
             CancelledElicitation,
             DeclinedElicitation,
@@ -1317,8 +1340,11 @@ class TaskContext:
         max_tokens: int = 512,
         system_prompt: str | None = None,
         temperature: float | None = None,
+        model_preferences: Any | None = None,
     ) -> Any:
         """Distributed mode sampling via Redis Pub/Sub."""
+        self._ensure_distributed_enabled()
+
         import mcp.types
 
         from fastmcp.server.tasks.redis_proxy import send_sample_via_redis
@@ -1332,6 +1358,14 @@ class TaskContext:
             for m in sampling_messages
         ]
 
+        # Serialize model_preferences if provided
+        model_prefs_data = None
+        if model_preferences is not None:
+            if hasattr(model_preferences, "model_dump"):
+                model_prefs_data = model_preferences.model_dump(mode="json")
+            else:
+                model_prefs_data = model_preferences
+
         # Send via Redis and wait for response
         result_data = await send_sample_via_redis(
             docket=docket,
@@ -1341,6 +1375,7 @@ class TaskContext:
             max_tokens=max_tokens,
             system_prompt=system_prompt,
             temperature=temperature,
+            model_preferences=model_prefs_data,
         )
 
         return mcp.types.CreateMessageResult.model_validate(result_data)

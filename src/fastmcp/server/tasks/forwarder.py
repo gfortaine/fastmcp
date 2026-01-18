@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -183,19 +184,44 @@ class ElicitForwarder:
             # Import here to avoid circular imports
             from mcp.types import ElicitResult
 
-            # Call the actual session elicit
-            result: ElicitResult = await self.session.elicit(
-                message=request_data["message"],
-                requestedSchema=request_data.get("schema", {}),
+            from fastmcp.server.tasks.subscriptions import (
+                send_input_required_notification,
             )
 
-            response_payload = json.dumps(
-                {
-                    "request_id": request_id,
-                    "action": result.action,
-                    "content": result.content,
-                }
+            # Send input_required status per SEP-1686
+            await send_input_required_notification(
+                session=self.session,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                docket=self.docket,
+                status="input_required",
             )
+
+            try:
+                # Call the actual session elicit with related_request_id (MCP SDK parameter name)
+                result: ElicitResult = await self.session.elicit(
+                    message=request_data["message"],
+                    requestedSchema=request_data.get("schema", {}),
+                    related_request_id=self.task_id,
+                )
+
+                response_payload = json.dumps(
+                    {
+                        "request_id": request_id,
+                        "action": result.action,
+                        "content": result.content,
+                    }
+                )
+            finally:
+                # Restore status to working per SEP-1686
+                with suppress(Exception):
+                    await send_input_required_notification(
+                        session=self.session,
+                        task_id=self.task_id,
+                        session_id=self.session_id,
+                        docket=self.docket,
+                        status="working",
+                    )
 
         except Exception as e:
             logger.error(f"Elicit forwarding failed: {e}")
@@ -224,26 +250,75 @@ class ElicitForwarder:
 
         try:
             # Import here to avoid circular imports
-            from mcp.types import CreateMessageResult, SamplingMessage, TextContent
 
-            # Build sampling messages
+            from mcp.types import (
+                CreateMessageResult,
+                SamplingMessage,
+                TextContent,
+            )
+
+            from fastmcp.server.tasks.subscriptions import (
+                send_input_required_notification,
+            )
+
+            # Build sampling messages with proper content type handling
+            # Use TypeAdapter to support non-text content (images, audio, etc.)
             messages = []
             for m in request_data["messages"]:
                 role = m.get("role", "user")
-                content = m.get("content", {})
-                if isinstance(content, str):
-                    content = TextContent(type="text", text=content)
-                elif isinstance(content, dict):
-                    content = TextContent.model_validate(content)
+                raw_content = m.get("content", {})
+                if isinstance(raw_content, str):
+                    content = TextContent(type="text", text=raw_content)
+                elif isinstance(raw_content, dict):
+                    # Validate using the content's type field to handle all content types
+                    content_type = raw_content.get("type", "text")
+                    if content_type == "text":
+                        content = TextContent.model_validate(raw_content)
+                    else:
+                        # For non-text content, use dynamic type detection
+                        # Import the union type for proper validation
+                        from mcp.types import (
+                            ImageContent,
+                        )
+
+                        if content_type == "image":
+                            content = ImageContent.model_validate(raw_content)
+                        else:
+                            # Fallback to TextContent for unknown types
+                            content = TextContent.model_validate(raw_content)
+                else:
+                    content = raw_content
                 messages.append(SamplingMessage(role=role, content=content))
 
-            # Call the actual session create_message
-            result: CreateMessageResult = await self.session.create_message(
-                messages=messages,
-                max_tokens=request_data.get("max_tokens", 512),
-                system_prompt=request_data.get("system_prompt"),
-                temperature=request_data.get("temperature"),
+            # Send input_required status per SEP-1686
+            await send_input_required_notification(
+                session=self.session,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                docket=self.docket,
+                status="input_required",
             )
+
+            try:
+                # Call the actual session create_message with related_request_id (MCP SDK parameter name)
+                result: CreateMessageResult = await self.session.create_message(
+                    messages=messages,
+                    max_tokens=request_data.get("max_tokens", 512),
+                    system_prompt=request_data.get("system_prompt"),
+                    temperature=request_data.get("temperature"),
+                    model_preferences=request_data.get("model_preferences"),
+                    related_request_id=self.task_id,
+                )
+            finally:
+                # Restore status to working per SEP-1686
+                with suppress(Exception):
+                    await send_input_required_notification(
+                        session=self.session,
+                        task_id=self.task_id,
+                        session_id=self.session_id,
+                        docket=self.docket,
+                        status="working",
+                    )
 
             # Serialize result
             response_payload = json.dumps(

@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 # Redis mapping TTL buffer: Add 15 minutes to Docket's execution_ttl
 TASK_MAPPING_TTL_BUFFER_SECONDS = 15 * 60
 
+# Track sessions that have forwarder cleanup registered
+_sessions_with_cleanup: set[str] = set()
+
 
 async def submit_to_docket(
     task_type: Literal["tool", "resource", "template", "prompt"],
@@ -111,14 +114,28 @@ async def submit_to_docket(
 
         # Start forwarder for distributed workers if enabled (FASTMCP_DISTRIBUTED_WORKERS=1)
         # The forwarder bridges Redis Pub/Sub to the session for elicit/sample requests
-        from fastmcp.server.tasks.forwarder import start_forwarder
+        from fastmcp.server.tasks.forwarder import (
+            start_forwarder,
+            stop_forwarders_for_session,
+        )
 
-        await start_forwarder(
+        forwarder = await start_forwarder(
             session_id=session_id,
             task_id=server_task_id,
             session=ctx.session,
             docket=docket,
         )
+
+        # Register cleanup callback on session exit (once per session)
+        # This ensures forwarders are stopped when the session disconnects
+        if forwarder is not None and session_id not in _sessions_with_cleanup:
+            _sessions_with_cleanup.add(session_id)
+
+            async def _cleanup_forwarders() -> None:
+                _sessions_with_cleanup.discard(session_id)
+                await stop_forwarders_for_session(session_id)
+
+            ctx.session._exit_stack.push_async_callback(_cleanup_forwarders)
 
     # Send notifications/tasks/created per SEP-1686 (mandatory)
     # Send BEFORE queuing to avoid race where task completes before notification
