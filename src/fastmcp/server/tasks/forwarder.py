@@ -283,12 +283,12 @@ class ElicitForwarder:
 
         try:
             # Import here to avoid circular imports
+
             import anyio
             import mcp.shared.exceptions
             import mcp.shared.message
             import mcp.types
             from mcp.types import (
-                SamplingContent,
                 SamplingMessage,
                 TextContent,
             )
@@ -299,8 +299,10 @@ class ElicitForwarder:
             )
 
             # Build sampling messages with proper content type handling
-            # Use TypeAdapter over SamplingContent union to support all content types
-            content_adapter: TypeAdapter[SamplingContent] = TypeAdapter(SamplingContent)
+            # Use TypeAdapter over SamplingMessage.content annotation to support all content types
+            # This includes text/image/audio, tool use/result, and lists of blocks
+            content_annotation = SamplingMessage.model_fields["content"].annotation
+            content_adapter: TypeAdapter[Any] = TypeAdapter(content_annotation)
             messages: list[SamplingMessage] = []
             for m in request_data["messages"]:
                 role = m.get("role", "user")
@@ -308,7 +310,7 @@ class ElicitForwarder:
                 if isinstance(raw_content, str):
                     content = TextContent(type="text", text=raw_content)
                 else:
-                    # Use TypeAdapter to validate any content type (text, image, audio, etc.)
+                    # Use TypeAdapter to validate any content type (including lists)
                     content = content_adapter.validate_python(raw_content)
                 messages.append(SamplingMessage(role=role, content=content))
 

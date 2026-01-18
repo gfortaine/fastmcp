@@ -952,10 +952,24 @@ class TaskContext:
     def is_distributed(self) -> bool:
         """Whether this TaskContext is running in distributed mode.
 
+        Returns True only if:
+        1. No embedded session is available (worker process)
+        2. Distributed mode is enabled (FASTMCP_DISTRIBUTED_WORKERS=1)
+
         In distributed mode, elicitation and sampling requests are forwarded
         via Redis Pub/Sub to the FastMCP server process.
         """
-        return self._distributed
+        return self._distributed and self._distributed_enabled
+
+    @property
+    def session_available(self) -> bool:
+        """Whether an embedded session is available.
+
+        This is the inverse of being in a distributed worker. Use this to
+        check if direct session access is possible, regardless of whether
+        distributed mode is enabled.
+        """
+        return not self._distributed
 
     def _ensure_distributed_enabled(self) -> None:
         """Validate that distributed mode is properly configured.
@@ -1354,8 +1368,15 @@ class TaskContext:
 
         # Convert messages to serializable format
         sampling_messages = self._convert_messages(messages)
+
+        # Helper to serialize content (can be single block or list of blocks)
+        def _dump_content(content: Any) -> Any:
+            if isinstance(content, list):
+                return [block.model_dump(mode="json") for block in content]
+            return content.model_dump(mode="json")
+
         messages_data = [
-            {"role": m.role, "content": m.content.model_dump(mode="json")}
+            {"role": m.role, "content": _dump_content(m.content)}
             for m in sampling_messages
         ]
 

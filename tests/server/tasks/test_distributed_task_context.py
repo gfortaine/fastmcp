@@ -166,26 +166,38 @@ class TestTaskContextDistributedMode:
         try:
             ctx = TaskContext(task_id="task1", session_id="sess1")
             assert not ctx.is_distributed
+            assert ctx.session_available
         finally:
             # Cleanup
             from fastmcp.server.dependencies import _task_sessions
 
             _task_sessions.pop("sess1", None)
 
-    def test_task_context_distributed_mode(self) -> None:
+    def test_task_context_distributed_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """TaskContext should detect distributed mode when session is not available."""
         from fastmcp.server.dependencies import TaskContext
 
-        # No session registered
+        # Enable distributed mode via feature flag
+        monkeypatch.setenv("FASTMCP_DISTRIBUTED_WORKERS", "1")
+
+        # No session registered, feature flag enabled
         ctx = TaskContext(task_id="task1", session_id="nonexistent")
         assert ctx.is_distributed
+        assert not ctx.session_available
 
-    def test_task_context_is_distributed_property(self) -> None:
-        """is_distributed property should reflect mode."""
+    def test_task_context_is_distributed_property(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """is_distributed property should reflect mode and feature flag."""
         from fastmcp.server.dependencies import TaskContext
+
+        # Enable distributed mode via feature flag
+        monkeypatch.setenv("FASTMCP_DISTRIBUTED_WORKERS", "1")
 
         ctx = TaskContext(task_id="task1", session_id="nonexistent")
         assert ctx.is_distributed is True
+        assert ctx.session_available is False
 
         # Verify it's a property, not a method
         assert isinstance(type(ctx).is_distributed, property)
+        assert isinstance(type(ctx).session_available, property)
