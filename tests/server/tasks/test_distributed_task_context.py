@@ -173,7 +173,9 @@ class TestTaskContextDistributedMode:
 
             _task_sessions.pop("sess1", None)
 
-    def test_task_context_distributed_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_task_context_distributed_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """TaskContext should detect distributed mode when session is not available."""
         from fastmcp.server.dependencies import TaskContext
 
