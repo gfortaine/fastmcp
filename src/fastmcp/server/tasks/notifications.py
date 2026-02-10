@@ -25,6 +25,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
+import anyio
 import mcp.types
 
 if TYPE_CHECKING:
@@ -96,7 +97,21 @@ async def notification_subscriber_loop(
 
     logger.debug("Starting notification subscriber for session %s", session_id)
 
+    def _session_is_closed(session_obj: ServerSession) -> bool:
+        for attr in ("_subscription_task_group", "_task_group"):
+            task_group = getattr(session_obj, attr, None)
+            cancel_scope = getattr(task_group, "cancel_scope", None)
+            if cancel_scope is not None and cancel_scope.cancel_called:
+                return True
+        return False
+
     while True:
+        if _session_is_closed(session):
+            logger.debug(
+                "Notification subscriber exiting for session %s (session closed)",
+                session_id,
+            )
+            break
         try:
             async with docket.redis() as redis:
                 # Heartbeat: mark subscriber as active (for distributed debugging)
@@ -108,9 +123,22 @@ async def notification_subscriber_loop(
                     Any, redis.brpop([queue_key], timeout=SUBSCRIBER_TIMEOUT_SECONDS)
                 )
                 if not result:
+                    if _session_is_closed(session):
+                        logger.debug(
+                            "Notification subscriber exiting for session %s (session closed)",
+                            session_id,
+                        )
+                        break
                     continue  # Timeout - refresh heartbeat and retry
 
                 _, message_bytes = result
+                if _session_is_closed(session):
+                    await redis.lpush(queue_key, message_bytes)  # type: ignore[invalid-await]
+                    logger.debug(
+                        "Session closed while waiting; requeued notification for session %s",
+                        session_id,
+                    )
+                    break
                 message = json.loads(message_bytes)
                 notification_dict = message["notification"]
                 attempt = message.get("attempt", 0)
@@ -123,7 +151,26 @@ async def notification_subscriber_loop(
                         session_id,
                         attempt + 1,
                     )
+                except (
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                ) as send_error:
+                    await redis.lpush(queue_key, message_bytes)  # type: ignore[invalid-await]
+                    logger.debug(
+                        "Session closed during send; requeued notification for session %s: %s",
+                        session_id,
+                        send_error,
+                    )
+                    break
                 except Exception as send_error:
+                    if _session_is_closed(session):
+                        await redis.lpush(queue_key, message_bytes)  # type: ignore[invalid-await]
+                        logger.debug(
+                            "Session closed during send; requeued notification for session %s: %s",
+                            session_id,
+                            send_error,
+                        )
+                        break
                     # Delivery failed - retry or discard
                     if attempt < MAX_DELIVERY_ATTEMPTS - 1:
                         # Re-queue with incremented attempt (back of queue)

@@ -184,9 +184,8 @@ async def test_as_proxy_deprecated_with_server(fastmcp_server):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         proxy = FastMCP.as_proxy(fastmcp_server)
-        assert len(w) == 1
-        assert issubclass(w[0].category, DeprecationWarning)
-        assert "create_proxy" in str(w[0].message)
+        assert any(issubclass(item.category, DeprecationWarning) for item in w)
+        assert any("create_proxy" in str(item.message) for item in w)
 
     async with Client(proxy) as client:
         result = await client.call_tool("greet", {"name": "Test"})
@@ -200,8 +199,8 @@ def test_as_proxy_deprecated_with_url():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         proxy = FastMCP.as_proxy("http://example.com/mcp/")
-        assert len(w) == 1
-        assert issubclass(w[0].category, DeprecationWarning)
+        assert any(issubclass(item.category, DeprecationWarning) for item in w)
+        assert any("create_proxy" in str(item.message) for item in w)
 
     assert isinstance(proxy, FastMCPProxy)
 

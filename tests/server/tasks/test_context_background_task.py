@@ -602,7 +602,7 @@ class TestLifespanContextIntegration:
             assert result.data == "ok"
 
         assert captured["has_db"] is True
-        lifespan_ctx = captured["lifespan"]
+        lifespan_ctx = cast(dict[str, str], captured["lifespan"])
         assert isinstance(lifespan_ctx, dict)
         assert lifespan_ctx.get("db") == "test-connection"
         assert lifespan_ctx.get("cache") == "test-cache"
