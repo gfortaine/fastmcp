@@ -331,6 +331,36 @@ class TestBackgroundTaskIntegration:
             result = await task.result()
             assert result.data == "done"
 
+    async def test_report_progress_non_monotonic(self):
+        """Non-monotonic progress values should not cause errors or over-count.
+
+        Docket only exposes increment() (relative), so we compute deltas.
+        If progress goes backwards (e.g. 50→30→60), we must skip the
+        backward step and only increment the forward delta from the last
+        high-water mark (50→60 = +10), not from the incorrectly-lowered
+        baseline (30→60 = +30).
+        """
+        mcp = FastMCP("progress-nonmono-test")
+        progress_reported = asyncio.Event()
+
+        @mcp.tool(task=True)
+        async def nonmono_progress(ctx: Context) -> str:
+            await ctx.report_progress(50, 100)
+            await ctx.report_progress(30, 100)  # backward — should be skipped
+            await ctx.report_progress(60, 100)  # forward from 50, not 30
+            await ctx.report_progress(60, 100)  # same value — no-op
+            await ctx.report_progress(0, 100)  # reset to zero — skipped
+            await ctx.report_progress(80, 100)  # forward from 60, not 0
+            progress_reported.set()
+            return "ok"
+
+        async with Client(mcp) as client:
+            task = await client.call_tool("nonmono_progress", {}, task=True)
+            await asyncio.wait_for(progress_reported.wait(), timeout=5.0)
+            await task.wait(timeout=5.0)
+            result = await task.result()
+            assert result.data == "ok"
+
     async def test_context_wiring_in_background_task(self):
         """Context should be properly wired with task_id and session_id."""
         mcp = FastMCP("wiring-test")
